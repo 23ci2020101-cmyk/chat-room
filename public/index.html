@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
   <title>Chat</title>
   <link rel="stylesheet" href="/style.css">
 </head>
@@ -71,6 +72,13 @@
   <div id="settings" class="overlay" role="dialog" aria-modal="true" aria-labelledby="settings-title" hidden>
     <div class="card">
       <h2 id="settings-title">Settings</h2>
+      <fieldset id="theme-pick" class="theme-pick">
+        <legend>Appearance</legend>
+        <label class="seg"><input type="radio" name="theme" value="system"><span>System</span></label>
+        <label class="seg"><input type="radio" name="theme" value="light"><span>Light</span></label>
+        <label class="seg"><input type="radio" name="theme" value="dark"><span>Dark</span></label>
+      </fieldset>
+      <hr>
       <form id="pw-form" autocomplete="off">
         <label for="pw-old">Current password</label>
         <input id="pw-old" type="password" autocomplete="current-password" maxlength="128" required>
@@ -86,6 +94,7 @@
     </div>
   </div>
 
+  <div id="msg-menu" class="menu" role="menu" aria-label="Message actions" hidden></div>
   <div id="toast" class="toast" role="status" hidden></div>
   <script src="/app.js"></script>
 </body>

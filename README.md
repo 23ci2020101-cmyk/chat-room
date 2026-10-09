@@ -14,12 +14,12 @@ One program serves the web page, the JSON API and the WebSocket endpoint.
 - **Message ticks in private chats**: ✓ sent, ✓✓ delivered (recipient online or has since connected),
   blue ✓✓ read (recipient had the chat open). Receipt state is persisted
 - Unread-messages divider, date separators, and "Load older messages" pagination
-- **Reply to a message** (quoted in the bubble, click the quote to jump to it) and **delete for everyone**
+- **Click a message for its menu**: Reply and Copy on any message, plus Delete for everyone on your own (keyboard: Enter/Space opens it, arrows move, Esc closes). Replies are quoted in the bubble; click the quote to jump to the original
   (tombstone for both sides; the text is scrubbed from `messages.log` too)
 - Messages typed while disconnected are queued, shown dimmed, and sent automatically on reconnect
 - Unread count in the tab title, optional desktop notifications, emoji picker
 - Settings: change password (logs every other device out) and log out of all devices
-- Responsive dark UI
+- Responsive UI with **System / Light / Dark** themes (Settings → Appearance, remembered per browser), subtle animations that switch off under `prefers-reduced-motion`
 
 ## Build and run
 

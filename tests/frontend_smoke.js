@@ -81,9 +81,37 @@ const T = Date.now();
   push({ type: 'unread', with: 'carol', count: 0 });
   ok('title badge clears', !w.document.title.startsWith('('));
 
-  // reply: click reply on bob's message -> bar shown, outgoing msg carries reply id
-  const bubble = [...$('messages').children].find((e) => e.dataset && e.dataset.id === '6');
-  bubble.querySelector('.actions button').click();
+  // click a message -> a menu with only the actions that apply to it
+  const labels = () => [...$('msg-menu').querySelectorAll('.item')].map((x) => x.lastElementChild.textContent);
+  const find = (id) => [...$('messages').children].find((e) => e.dataset && e.dataset.id === id);
+  let bubble = find('6');
+  ok('menu hidden until a message is clicked', $('msg-menu').hidden);
+  ok('messages are keyboard-focusable buttons that announce a menu', bubble.tabIndex === 0 && bubble.getAttribute('aria-haspopup') === 'menu' && bubble.getAttribute('aria-expanded') === 'false');
+  ok('no always-on action buttons inside bubbles', $('messages').querySelector('.actions') === null);
+  bubble.click();
+  ok('click opens the menu and marks the bubble', !$('msg-menu').hidden && $('msg-menu').getAttribute('role') === 'menu' && bubble.getAttribute('aria-expanded') === 'true' && bubble.classList.contains('menu-open'));
+  ok("someone else's message: Reply + Copy only, no Delete", JSON.stringify(labels()) === JSON.stringify(['Reply', 'Copy text']));
+  ok('first menu item takes focus', w.document.activeElement === $('msg-menu').firstElementChild);
+  bubble.click();
+  ok('clicking the same bubble again closes the menu', $('msg-menu').hidden && bubble.getAttribute('aria-expanded') === 'false');
+  bubble.click();
+  w.document.body.click();
+  ok('clicking elsewhere closes the menu', $('msg-menu').hidden);
+  bubble.click();
+  w.document.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape' }));
+  ok('Escape closes the menu and returns focus to the message', $('msg-menu').hidden && w.document.activeElement === bubble);
+  bubble.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  ok('Enter on a focused message opens the menu', !$('msg-menu').hidden);
+  $('msg-menu').dispatchEvent(new w.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+  ok('ArrowDown moves to the next item', w.document.activeElement === $('msg-menu').children[1]);
+  $('msg-menu').dispatchEvent(new w.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+  ok('arrow keys wrap around', w.document.activeElement === $('msg-menu').children[0]);
+  w.document.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape' }));
+
+  // reply from the menu: bar shown, outgoing msg carries reply id
+  bubble.click();
+  [...$('msg-menu').querySelectorAll('.item')][0].click();
+  ok('choosing Reply closes the menu', $('msg-menu').hidden);
   ok('reply bar shown', !$('reply-bar').hidden && $('reply-text').textContent === 'hi');
   $('msg-input').value = 'answer';
   $('msg-form').dispatchEvent(new w.Event('submit', { cancelable: true }));
@@ -91,23 +119,57 @@ const T = Date.now();
   ok('reply bar cleared after send', $('reply-bar').hidden);
   push({ type: 'msg', id: '12', from: 'alice', to: 'bob', text: 'answer', ts: T + 4000, reply: { id: '6', from: 'bob', text: 'hi', deleted: false } });
   ok('quote rendered inside bubble', $('messages').querySelector('.quote .qtext').textContent === 'hi' && $('messages').querySelector('.quote .qwho').textContent === 'bob');
+  ok('newest message gets the entrance animation, older ones do not', $('messages').querySelectorAll('.msg.enter').length === 1 && find('12').classList.contains('enter'));
+  push({ type: 'receipt', with: 'bob', status: 'read', upto: '12' });
+  ok('a re-render for a receipt does not replay the animation', $('messages').querySelector('.msg.enter') === null);
 
-  // delete: own message has delete action; frame removes text everywhere
-  const mine = [...$('messages').children].find((e) => e.dataset && e.dataset.id === '12');
-  ok('own message has delete button, others do not', mine.querySelectorAll('.actions button').length === 2 && bubble.querySelectorAll('.actions button').length === 1);
+  // the quote jumps to the original and must not open the menu
+  find('12').querySelector('.quote').click();
+  ok('clicking a quote does not open the menu', $('msg-menu').hidden);
+
+  // copy
+  let copied = null;
+  Object.defineProperty(w.navigator, 'clipboard', { configurable: true, value: { writeText: (x) => { copied = x; return Promise.resolve(); } } });
+  bubble = find('6'); bubble.click();
+  [...$('msg-menu').querySelectorAll('.item')][1].click();
+  await new Promise((r) => setTimeout(r, 0));
+  ok('Copy text writes the message to the clipboard and confirms', copied === 'hi' && $('toast').textContent === 'Copied' && $('toast').classList.contains('ok'));
+
+  // delete: only my own messages offer it; confirm required; frame removes text everywhere
+  const mine = find('12');
+  mine.click();
+  ok('own message: Reply + Copy + Delete for everyone', JSON.stringify(labels()) === JSON.stringify(['Reply', 'Copy text', 'Delete for everyone']));
+  ok('delete item is styled as destructive', $('msg-menu').lastElementChild.classList.contains('destructive'));
+  w.confirm = () => false;
+  $('msg-menu').lastElementChild.click();
+  ok('declining the confirmation sends nothing', !sent.some((m) => m.type === 'delete'));
+  mine.click();
   w.confirm = () => true;
-  mine.querySelectorAll('.actions button')[1].click();
+  $('msg-menu').lastElementChild.click();
   ok('delete frame sent', sent.some((m) => m.type === 'delete' && m.id === '12'));
   push({ type: 'deleted', id: '12', from: 'alice', to: 'bob' });
-  const after = [...$('messages').children].find((e) => e.dataset && e.dataset.id === '12');
-  ok('deleted bubble shows tombstone, no text, no actions', after.textContent.includes('This message was deleted') && !after.textContent.includes('answer') && !after.querySelector('.actions'));
+  const after = find('12');
+  ok('deleted bubble shows tombstone, no text, not clickable', after.textContent.includes('This message was deleted') && !after.textContent.includes('answer') &&
+     !after.classList.contains('actionable') && !after.hasAttribute('tabindex'));
+  after.click();
+  ok('clicking a deleted message opens no menu', $('msg-menu').hidden);
   ok('chat-list preview shows deleted', $('chat-list').textContent.includes('This message was deleted'));
+
+  // a message arriving while the menu is open must not kill it: it re-attaches to the rebuilt bubble
+  const before6 = find('6'); before6.click();
+  push({ type: 'msg', id: '13', from: 'bob', to: 'alice', text: 'still there?', ts: T + 5000 });
+  const after6 = find('6');
+  ok('menu survives an incoming message and follows the rebuilt bubble', !$('msg-menu').hidden && after6 !== before6 && after6.classList.contains('menu-open') && after6.getAttribute('aria-expanded') === 'true');
+  push({ type: 'deleted', id: '6', from: 'bob', to: 'alice' });
+  ok('menu closes when its message is deleted', $('msg-menu').hidden);
+  w.document.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape' }));
 
   // offline queue: disconnect, type, reconnect -> flushed in order
   sock.readyState = 3;
   $('msg-input').value = 'queued one';
   $('msg-form').dispatchEvent(new w.Event('submit', { cancelable: true }));
   ok('offline message shown dimmed as pending', $('messages').querySelector('.msg.pending') !== null && $('msg-input').value === '');
+  ok('a pending bubble is not clickable (nothing to reply to / delete yet)', !$('messages').querySelector('.msg.pending').classList.contains('actionable'));
   const n0 = sent.length;
   sock.readyState = 1; sock.onopen();
   ok('pending message sent on reconnect', sent.slice(n0).some((m) => m.type === 'msg' && m.text === 'queued one' && m.to === 'bob'));
@@ -124,6 +186,20 @@ const T = Date.now();
   ok('settings dialog opens', !$('settings').hidden);
   w.document.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape' }));
   ok('Escape closes settings', $('settings').hidden);
+
+  // theme: System (default) / Light / Dark, remembered
+  const root = w.document.documentElement;
+  ok('theme defaults to following the system', !root.hasAttribute('data-theme'));
+  $('settings-btn').click();
+  ok('settings shows the current theme choice', w.document.querySelector('input[name=theme][value=system]').checked);
+  const pick = (v) => { const r = w.document.querySelector(`input[name=theme][value=${v}]`); r.checked = true; r.dispatchEvent(new w.Event('change', { bubbles: true })); };
+  pick('light');
+  ok('Light sets data-theme and is remembered', root.getAttribute('data-theme') === 'light' && w.localStorage.getItem('chat-theme') === 'light');
+  pick('dark');
+  ok('Dark sets data-theme and is remembered', root.getAttribute('data-theme') === 'dark' && w.localStorage.getItem('chat-theme') === 'dark');
+  pick('system');
+  ok('System clears the override', !root.hasAttribute('data-theme') && w.localStorage.getItem('chat-theme') === null);
+  w.document.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape' }));
   console.log(fails ? `\n${fails} FAILED` : '\nfrontend smoke: all passed');
   process.exit(fails ? 1 : 0);
 })();

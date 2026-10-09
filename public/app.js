@@ -12,13 +12,32 @@
     typingTimers: new Map(), lastTypingSent: 0, authMode: 'login', filter: '',
     pending: [],            // messages typed while disconnected: { to, text, reply }
     replyTo: null,          // { id, from, text } being quoted by the composer
+    menu: null,             // { id, el, mine } while the message menu is open
+    enterId: null,          // id of a just-arrived message, so only it gets the entrance animation
   };
   const BASE_TITLE = document.title;
   const EMOJI = ['\u{1F600}','\u{1F602}','\u{1F60A}','\u{1F60D}','\u{1F970}','\u{1F60E}','\u{1F914}','\u{1F62E}','\u{1F622}','\u{1F62D}','\u{1F621}','\u{1F44D}','\u{1F44E}','\u{1F44F}','\u{1F64F}','\u{1F4AA}','\u{2764}\u{FE0F}','\u{1F525}','\u{1F389}','\u{2728}','\u{1F440}','\u{1F4AF}','\u{2705}','\u{1F44B}'];
 
+  /* ---------------- theme ---------------- */
+  // 'system' = follow the OS (pure CSS media query); 'light' / 'dark' force it via <html data-theme>.
+  const THEME_KEY = 'chat-theme';
+  function getTheme() {
+    try { const t = localStorage.getItem(THEME_KEY); return t === 'light' || t === 'dark' ? t : 'system'; } catch (_) { return 'system'; }
+  }
+  function applyTheme(t) {
+    const r = document.documentElement;
+    if (t === 'light' || t === 'dark') r.setAttribute('data-theme', t); else r.removeAttribute('data-theme');
+  }
+  function setTheme(t) {
+    applyTheme(t);
+    try { if (t === 'system') localStorage.removeItem(THEME_KEY); else localStorage.setItem(THEME_KEY, t); } catch (_) { /* private mode: still applies this session */ }
+  }
+  applyTheme(getTheme());
+
   /* ---------------- helpers ---------------- */
-  function toast(msg) {
+  function toast(msg, ok) {
     const t = $('toast');
+    t.classList.toggle('ok', !!ok);
     t.textContent = msg; t.hidden = false;
     clearTimeout(toast.timer);
     toast.timer = setTimeout(() => { t.hidden = true; }, 4000);
@@ -90,6 +109,7 @@
 
   /* ---------------- auth UI ---------------- */
   function showAuth() {
+    closeMenu();
     state.intentionalClose = true;
     if (state.ws) state.ws.close();
     clearTimeout(state.reconnectTimer);
@@ -220,6 +240,7 @@
         setLast(c, m);
         if (key === state.current) {
           const box = $('messages');
+          state.enterId = m.id;
           const near = box.scrollHeight - box.scrollTop - box.clientHeight < 80 || m.from === state.me;
           renderMessages(near ? 'bottom' : 'same');
           clearTyping(m.from);
@@ -290,6 +311,7 @@
     $('typing').textContent = '';
     renderAll();
     $('sidebar').classList.remove('open');
+    const box = $('messages'); box.classList.remove('swap'); void box.offsetWidth; box.classList.add('swap');
     $('msg-input').focus();
   }
 
@@ -378,6 +400,7 @@
   function renderMessages(mode = 'bottom') {
     const box = $('messages');
     const prevH = box.scrollHeight, prevTop = box.scrollTop;
+    const keepMenu = state.menu ? state.menu.id : null;     // re-attach an open menu to the rebuilt bubble below
     box.textContent = '';
     const c = conv(state.current);
 
@@ -407,6 +430,7 @@
       const el = document.createElement('div');
       el.className = 'msg' + (mine ? ' mine' : '') + (m.deleted ? ' deleted' : '');
       el.dataset.id = m.id;
+      if (m.id === state.enterId) el.classList.add('enter');
       if (!mine && state.current === GROUP) {
         const w = document.createElement('span'); w.className = 'who'; w.textContent = m.from; el.appendChild(w);
       }
@@ -416,7 +440,7 @@
       t.appendChild(document.createTextNode(fmtTime(m.ts)));
       if (mine && !m.deleted && state.current !== GROUP) { t.appendChild(document.createTextNode(' ')); t.appendChild(tickEl(m.status || 'sent')); }
       el.appendChild(t);
-      if (!m.deleted) el.appendChild(actionsEl(m, mine));
+      if (!m.deleted) makeActionable(el, m);
       box.appendChild(el);
     }
     for (const p of state.pending) {                       // typed while offline: shown dimmed until sent
@@ -426,10 +450,16 @@
       const t = document.createElement('span'); t.className = 'time'; t.textContent = '\u{1F552} waiting to send'; el.appendChild(t);
       box.appendChild(el);
     }
+    state.enterId = null;
     if (mode === 'prepend') box.scrollTop = prevTop + (box.scrollHeight - prevH);
     else if (mode === 'same') box.scrollTop = prevTop;
     else if (mode === 'divider' && divider) box.scrollTop = Math.max(0, divider.offsetTop - 60);
     else box.scrollTop = box.scrollHeight;
+    if (keepMenu) {                                         // a new message / receipt arrived while the menu was open
+      const el = [...box.children].find((e) => e.dataset && e.dataset.id === keepMenu && e.classList.contains('actionable'));
+      if (el) { state.menu.el = el; el.classList.add('menu-open'); el.setAttribute('aria-expanded', 'true'); placeMenu(); }
+      else closeMenu();                                     // message gone (deleted, other chat)
+    }
   }
 
   function quoteEl(r) {
@@ -444,17 +474,92 @@
     });
     return q;
   }
-  function actionsEl(m, mine) {
-    const a = document.createElement('span'); a.className = 'actions';
-    const rb = document.createElement('button'); rb.type = 'button'; rb.textContent = '\u21A9'; rb.title = 'Reply'; rb.setAttribute('aria-label', 'Reply');
-    rb.addEventListener('click', () => setReply({ id: m.id, from: m.from, text: m.text.slice(0, 80) }));
-    a.appendChild(rb);
-    if (mine) {
-      const db = document.createElement('button'); db.type = 'button'; db.textContent = '\u{1F5D1}'; db.title = 'Delete for everyone'; db.setAttribute('aria-label', 'Delete for everyone');
-      db.addEventListener('click', () => { if (confirm('Delete this message for everyone?')) send({ type: 'delete', id: m.id }); });
-      a.appendChild(db);
+  /* ---------------- message menu ----------------
+     Clicking (or Enter / Space / right-click on) a bubble opens a small menu with only the actions that apply:
+       Reply        - any message
+       Copy text    - any message
+       Delete       - only my own messages */
+  function makeActionable(el, m) {
+    el.classList.add('actionable');
+    el.tabIndex = 0;
+    el.setAttribute('role', 'button');
+    el.setAttribute('aria-haspopup', 'menu');
+    el.setAttribute('aria-expanded', 'false');
+    el.addEventListener('click', (e) => {
+      if (e.target.closest && e.target.closest('.quote')) return;           // the quote jumps to the original instead
+      const sel = window.getSelection && window.getSelection();
+      if (sel && !sel.isCollapsed && el.contains(sel.anchorNode)) return;   // the user is selecting text, not opening a menu
+      openMenu(el, m, true);
+    });
+    el.addEventListener('keydown', (e) => {
+      if ((e.key === 'Enter' || e.key === ' ') && e.target === el) { e.preventDefault(); openMenu(el, m, true); }
+    });
+    el.addEventListener('contextmenu', (e) => { e.preventDefault(); openMenu(el, m, false); });
+  }
+  function menuItems(m) {
+    const items = [
+      { label: 'Reply', icon: '\u21A9', run: () => setReply({ id: m.id, from: m.from, text: m.text.slice(0, 80) }) },
+      { label: 'Copy text', icon: '\u{1F4CB}', run: () => copyText(m.text) },
+    ];
+    if (m.from === state.me) {
+      items.push({ label: 'Delete for everyone', icon: '\u{1F5D1}', destructive: true,
+        run: () => { if (confirm('Delete this message for everyone?')) send({ type: 'delete', id: m.id }); } });
     }
-    return a;
+    return items;
+  }
+  function copyText(text) {
+    const done = () => toast('Copied', true), fail = () => toast('Could not copy');
+    if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text).then(done, fail); return; }
+    try {                                                    // plain-http fallback: the Clipboard API needs a secure context
+      const ta = document.createElement('textarea'); ta.value = text; ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      const okc = document.execCommand && document.execCommand('copy');
+      ta.remove(); okc ? done() : fail();
+    } catch (_) { fail(); }
+  }
+  function openMenu(el, m, toggle) {
+    if (toggle && state.menu && state.menu.id === m.id) { closeMenu(true); return; }
+    closeMenu();
+    const menu = $('msg-menu'), mine = m.from === state.me;
+    menu.textContent = '';
+    for (const it of menuItems(m)) {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'item' + (it.destructive ? ' destructive' : ''); b.setAttribute('role', 'menuitem');
+      const ic = document.createElement('span'); ic.className = 'ico'; ic.setAttribute('aria-hidden', 'true'); ic.textContent = it.icon;
+      const lb = document.createElement('span'); lb.textContent = it.label;
+      b.appendChild(ic); b.appendChild(lb);
+      b.addEventListener('click', () => { closeMenu(true); it.run(); });
+      menu.appendChild(b);
+    }
+    menu.classList.toggle('mine', mine);
+    menu.hidden = false;
+    state.menu = { id: m.id, el, mine };
+    el.classList.add('menu-open'); el.setAttribute('aria-expanded', 'true');
+    placeMenu();
+    menu.firstElementChild.focus({ preventScroll: true });
+  }
+  function closeMenu(restoreFocus) {
+    const mn = state.menu;
+    if (!mn) return;
+    state.menu = null;
+    $('msg-menu').hidden = true;
+    mn.el.classList.remove('menu-open'); mn.el.setAttribute('aria-expanded', 'false');
+    if (restoreFocus && mn.el.isConnected) mn.el.focus({ preventScroll: true });
+  }
+  // Put the menu just above the bubble (below if there is no room), aligned to its own side, kept inside the viewport.
+  function placeMenu() {
+    const mn = state.menu;
+    if (!mn) return;
+    const menu = $('msg-menu'), r = mn.el.getBoundingClientRect(), pad = 8;
+    const mw = menu.offsetWidth || 176, mh = menu.offsetHeight || 100;
+    const vw = window.innerWidth, vh = window.innerHeight;
+    let top = r.top - mh - 6, below = false;
+    if (top < pad) { top = r.bottom + 6; below = true; }
+    top = Math.max(pad, Math.min(top, vh - mh - pad));
+    const left = Math.max(pad, Math.min(mn.mine ? r.right - mw : r.left, vw - mw - pad));
+    menu.style.top = top + 'px'; menu.style.left = left + 'px';
+    menu.classList.toggle('below', below);
   }
   function setReply(r) {
     state.replyTo = r;
@@ -505,7 +610,11 @@
   }
   function showSettings(show) {
     $('settings').hidden = !show;
-    if (show) { $('pw-msg').hidden = true; $('pw-old').focus(); }
+    if (show) {
+      const cur = getTheme();
+      for (const r of document.querySelectorAll('input[name=theme]')) r.checked = r.value === cur;
+      $('pw-msg').hidden = true; $('pw-old').focus();
+    }
     else { $('pw-old').value = ''; $('pw-new').value = ''; }
   }
 
@@ -544,7 +653,8 @@
   $('emoji-btn').addEventListener('click', () => toggleEmoji());
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
-    if (!$('settings').hidden) showSettings(false);
+    if (state.menu) closeMenu(true);
+    else if (!$('settings').hidden) showSettings(false);
     else if (!$('emoji-pop').hidden) toggleEmoji(false);
     else if (state.replyTo) setReply(null);
   });
@@ -574,7 +684,29 @@
   });
   $('user-filter').addEventListener('input', (e) => { state.filter = e.target.value; renderSidebar(); });
   $('menu-btn').addEventListener('click', () => $('sidebar').classList.toggle('open'));
-  $('messages').addEventListener('scroll', () => { if ($('messages').scrollTop < 60) loadOlder(); });
+  $('messages').addEventListener('scroll', () => {
+    if (state.menu) {                                       // follow the bubble while scrolling; close once it is out of view
+      const r = state.menu.el.getBoundingClientRect(), b = $('messages').getBoundingClientRect();
+      if (r.height && (r.bottom < b.top || r.top > b.bottom)) closeMenu(); else placeMenu();
+    }
+    if ($('messages').scrollTop < 60) loadOlder();
+  });
+  window.addEventListener('resize', placeMenu);
+  $('msg-menu').addEventListener('keydown', (e) => {
+    const items = [...$('msg-menu').querySelectorAll('.item')], i = items.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown') { e.preventDefault(); items[(i + 1) % items.length].focus(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); items[(i - 1 + items.length) % items.length].focus(); }
+    else if (e.key === 'Home') { e.preventDefault(); items[0].focus(); }
+    else if (e.key === 'End') { e.preventDefault(); items[items.length - 1].focus(); }
+    else if (e.key === 'Tab') closeMenu(true);
+  });
+  document.addEventListener('click', (e) => {               // click anywhere else closes it (a bubble click toggles it itself)
+    if (!state.menu) return;
+    const t = e.target;
+    if ($('msg-menu').contains(t) || (t.closest && t.closest('.msg.actionable'))) return;
+    closeMenu();
+  });
+  for (const r of document.querySelectorAll('input[name=theme]')) r.addEventListener('change', () => { if (r.checked) setTheme(r.value); });
   buildEmoji();
   document.addEventListener('visibilitychange', markRead);
   window.addEventListener('focus', markRead);
